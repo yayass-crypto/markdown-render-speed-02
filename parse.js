@@ -1250,13 +1250,16 @@ function parseInline(src, refs, inLink, st) {
     if (c === '<') {
       const a = parseAngle(src, i, refs, inLink);
       if (a) {
-        // An <a> opening tag in the SOURCE sets the document-level
-        // inLink (which disables extended autolinks until a </a>
-        // closes it); a self-closing <a .../> does not. Only a raw
-        // tag counts here, never a generated autolink <a href>.
+        // An <a> tag in the SOURCE sets the document-level inLink
+        // (which disables extended autolinks until a </a> closes
+        // it). The trigger is a tag starting with "<a " (a space
+        // after the a, self-closing included); the release is a tag
+        // starting with "</a>". Test the source text, never the
+        // generated output: an angle autolink <https://...> is not
+        // a raw tag.
         if (st) {
-          if (/^<a(?=[\s>])/i.test(src.slice(i, i + 10)) && !/\/>$/.test(a.html)) st.inLink = true;
-          else if (/^<\/a(?=[\s>])/i.test(src.slice(i, i + 10))) st.inLink = false;
+          if (/^<a /i.test(src.slice(i, i + 10))) st.inLink = true;
+          else if (/^<\/a>/i.test(src.slice(i, i + 10))) st.inLink = false;
         }
         flush();
         items.push(a.html);
@@ -1966,15 +1969,19 @@ function parseListItem(lines, i, hi, listMarker, refs, lastNL, paraBreaks, force
   let sawBlank = false;
   const emptyContent = ic.content === '';
   // A fenced code block open in the item's sub-lines: its content
-  // lines are never code lines (no extra four-column strip), and a
-  // lazy line inside it is fence content.
+  // lines are never code lines (no extra four-column strip). A
+  // low-indent line is fence content only once the fence already
+  // has a content line and the previous line was not blank: the
+  // first line after the opening, or a line after a blank, ends
+  // the item instead.
   let fence = null;
+  let fenceContent = 0;
   const checkFenceOpen = (stripped) => {
     if (fence) return;
     const sInd = indentCols(stripped);
     if (sInd <= 3) {
       const fm = matchFence(stripped.slice(firstNonWs(stripped)));
-      if (fm) fence = fm;
+      if (fm) { fence = fm; fenceContent = 0; }
     }
   };
   const checkFenceClose = (stripped) => {
@@ -2007,6 +2014,7 @@ function parseListItem(lines, i, hi, listMarker, refs, lastNL, paraBreaks, force
         const stripped = stripCols(le, contentIndent, 0);
         checkFenceClose(stripped);
         sub.push(stripped);
+        if (fence) fenceContent++;
         inPara = false;
         codeClosed = false;
       } else if (inPara && li >= contentIndent + 4) {
@@ -2034,10 +2042,21 @@ function parseListItem(lines, i, hi, listMarker, refs, lastNL, paraBreaks, force
       const m = matchListMarker(l.slice(firstNonWs(l)));
       if (m) break; // any list marker ends this item
     }
-    // A lazy line inside a fenced code block is fence content.
+    // A lazy line inside a fenced code block is fence content only
+    // once the fence already has a content line and the previous
+    // line was not blank; otherwise the item ends here. A line that
+    // closes the fence, or opens a new one, also ends the item
+    // instead of closing or joining it.
     if (fence) {
+      if (fenceContent === 0 || sub[sub.length - 1] === '') break;
+      const sInd = indentCols(l);
+      if (sInd <= 3) {
+        const s = l.slice(firstNonWs(l));
+        if (isFenceClose(s, fence.ch, fence.len) || matchFence(s)) break;
+      }
       checkFenceClose(l);
       sub.push(l);
+      if (fence) fenceContent++;
       inPara = false;
       codeClosed = false;
       j++;
