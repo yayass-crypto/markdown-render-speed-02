@@ -1666,7 +1666,7 @@ function parseBlocks(lines, lo, hi, refs, lastNL, paraBreaks, forcePara, inList)
     pendingBlank = false;
     // A line forced to be paragraph text skips every block check.
     if (forcePara && forcePara.has(i)) {
-      const para = parseParagraph(lines, i, hi, refs, paraBreaks, forcePara, inList);
+      const para = parseParagraph(lines, i, hi, refs, paraBreaks, forcePara, inList, lastNL);
       if (para.node) blocks.push(para.node);
       i = para.next;
       continue;
@@ -1919,7 +1919,7 @@ function parseBlocks(lines, lo, hi, refs, lastNL, paraBreaks, forcePara, inList)
       continue;
     }
     // Paragraph (or setext heading, or table).
-    const para = parseParagraph(lines, i, hi, refs, paraBreaks, forcePara, inList);
+    const para = parseParagraph(lines, i, hi, refs, paraBreaks, forcePara, inList, lastNL);
     if (para.node) blocks.push(para.node);
     i = para.next;
   }
@@ -2369,7 +2369,7 @@ function matchTableDelim(s) {
 // Paragraphs (with setext headings and tables)
 // ---------------------------------------------------------------------------
 
-function parseParagraph(lines, i, hi, refs, paraBreaks, forcePara, inList) {
+function parseParagraph(lines, i, hi, refs, paraBreaks, forcePara, inList, lastNL) {
   const paraLines = [lines[i]];
   let j = i + 1;
   let isTable = false;
@@ -2377,6 +2377,16 @@ function parseParagraph(lines, i, hi, refs, paraBreaks, forcePara, inList) {
   while (j < hi) {
     const l = lines[j];
     if (isBlank(l)) {
+      // A whitespace-only line that is the last line of content
+      // which does not end with a newline is paragraph text (its
+      // spaces are kept), not a blank line; an empty line is always
+      // blank, and with a trailing newline it is a blank line too.
+      if (l !== '' && j === hi - 1 && !lastNL) {
+        if (paraBreaks && paraBreaks.has(j)) paraLines.push('');
+        paraLines.push(l);
+        j++;
+        continue;
+      }
       // A table row line is only ended by a spaces-only line; a line
       // containing a tab is still a table row (its row pattern
       // excludes ` *\n` but not a tab).
