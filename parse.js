@@ -1694,8 +1694,9 @@ function parseBlocks(lines, lo, hi, refs, lastNL, paraBreaks, forcePara, inList)
       while (j < hi) {
         const l = lines[j];
         if (indentCols(l) <= 3 && isFenceClose(l.slice(firstNonWs(l)), fence.ch, fence.len)) { j++; break; }
-        // Content lines lose the opening fence's indent columns.
-        content.push(stripCols(l, ind, 0));
+        // Content lines lose the opening fence's indent columns, but
+        // only for backtick fences: a tilde fence never dedents.
+        content.push(fence.ch === '`' ? stripCols(l, ind, 0) : l);
         j++;
       }
       // One trailing EMPTY line is dropped from the content; a line
@@ -1763,10 +1764,15 @@ function parseBlocks(lines, lo, hi, refs, lastNL, paraBreaks, forcePara, inList)
         while (j < hi && !isBlank(lines[j])) { htmlLines.push(lines[j]); j++; }
       }
       let text = htmlLines.join('\n');
-      // The block keeps the newline ending its last line, unless the next
-      // line is blank (then the blank line swallows it) or the block is
-      // the last line with no trailing newline in the source.
-      if ((j < hi && !isBlank(lines[j])) || (j >= hi && lastNL)) text += '\n';
+      // The block keeps the newline ending its last line. For types 1-5
+      // it is only dropped when the next line is exactly empty; for
+      // types 6-7 any blank next line swallows it. At the end of the
+      // input it is kept exactly when the source ends with a newline.
+      const nextBlank = j < hi && isBlank(lines[j]);
+      const nextEmpty = j < hi && lines[j] === '';
+      if (ht <= 5) {
+        if ((j < hi && !nextEmpty) || (j >= hi && lastNL)) text += '\n';
+      } else if ((j < hi && !nextBlank) || (j >= hi && lastNL)) text += '\n';
       blocks.push({ k: 'html', text });
       i = j;
       continue;
