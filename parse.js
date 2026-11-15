@@ -808,16 +808,27 @@ function closerGroup(ch, B, A) {
   return 0;
 }
 
+// First index in the sorted masked-run list with pos > `pos`.
+function runAfter(runs, pos) {
+  let lo = 0, hi = runs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (runs[mid].pos > pos) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
+
 // marked's closer-scan patterns begin with an alternative that swallows a
 // lone `*` between two `__`s (or a lone `_` between two `**`s) right after
 // the opener, so that run is never a closer candidate. Find that run: the
 // first three `*`/`_` runs after the opener must be `__`, `*`, `__` (or
 // `**`, `_`, `**` for a `_` opener), with the middle run exactly one
-// character long.
-function alt1SkippedRun(op, delims) {
+// character long. `start` is the first masked run after the opener.
+function alt1SkippedRun(runs, start, ch) {
   let r1 = null, r2 = null, r3 = null, seen = 0;
-  for (let ci = op.di + 1; ci < delims.length && seen < 3; ci++) {
-    const C = delims[ci];
+  for (let ci = start; ci < runs.length && seen < 3; ci++) {
+    const C = runs[ci];
     if (C.ch === '~') continue;
     if (seen === 0) r1 = C;
     else if (seen === 1) r2 = C;
@@ -825,9 +836,9 @@ function alt1SkippedRun(op, delims) {
     seen++;
   }
   if (seen < 3) return null;
-  if (op.ch === '*') {
+  if (ch === '*') {
     if (r1.ch === '_' && r1.n === 2 && r2.ch === '*' && r2.n === 1 && r3.ch === '_' && r3.n >= 2) return r2;
-  } else if (op.ch === '_') {
+  } else if (ch === '_') {
     if (r1.ch === '*' && r1.n === 2 && r2.ch === '_' && r2.n === 1 && r3.ch === '*' && r3.n >= 2) return r2;
   }
   return null;
@@ -835,17 +846,20 @@ function alt1SkippedRun(op, delims) {
 
 // Scan forward from one opener attempt for a closer. `op` is the run, `j`
 // the offset within it where this attempt starts, `k` the opener length
-// for the attempt, `v` the scan bound (index of the last run of this
-// character preceded by a non-whitespace character). Returns
-// {closer, use} or null.
-function scanForCloser(op, j, k, delims, v) {
+// for the attempt, `runs` the masked-source runs, `v` the scan bound
+// (index of the last run of this character preceded by a non-whitespace
+// character), `byPos` maps a run's start position to the tokenised
+// delimiter there (for its item index and phantom flag). Candidates the
+// tokeniser never recorded are skipped. Returns {closer, use} or null.
+function scanForCloser(op, j, k, runs, v, byPos) {
   const ch = op.ch;
   const y = op.origLen;
-  const skip = alt1SkippedRun(op, delims);
+  const start = runAfter(runs, op.pos + op.n);
+  const skip = alt1SkippedRun(runs, start, ch);
   if (ch === '~') {
     let rem = k;
-    for (let ci = op.di + 1; ci < delims.length; ci++) {
-      const C = delims[ci];
+    for (let ci = start; ci < runs.length; ci++) {
+      const C = runs[ci];
       if (C.ch !== '~') continue;
       if (C.pos > v) break;
       if (C.n !== k) continue;
@@ -854,7 +868,9 @@ function scanForCloser(op, j, k, delims, v) {
       if (g === 3 || g === 4) { rem += C.n; continue; }
       rem -= C.n;
       if (rem > 0) continue;
-      return { closer: C, use: C.n };
+      const d = byPos.get(C.pos);
+      if (!d) continue;
+      return { closer: d, use: C.n };
     }
     return null;
   }
@@ -864,8 +880,8 @@ function scanForCloser(op, j, k, delims, v) {
   const d = op.after !== '~' && isUnicodePunct(op.after) ? op.after : '';
   const R = !isTrimEmpty(p) && (d !== '' || (ch === '*' && !h));
   let m = k, f = 0;
-  for (let ci = op.di + 1; ci < delims.length; ci++) {
-    const C = delims[ci];
+  for (let ci = start; ci < runs.length; ci++) {
+    const C = runs[ci];
     if (C.ch !== ch) continue;
     if (C.pos > v) break;
     if (C === skip) continue;
@@ -879,15 +895,19 @@ function scanForCloser(op, j, k, delims, v) {
     }
     m -= b;
     if (m > 0) continue;
-    return { closer: C, use: Math.min(b, b + m + f) };
+    const d = byPos.get(C.pos);
+    if (!d) continue;
+    return { closer: d, use: Math.min(b, b + m + f) };
   }
   return null;
 }
 
 // Try every opening offset of one delimiter run, opener-driven. `nPrev` is
 // the character before the run in the token stream ('' when the previous
-// token is not plain text). Returns {tag, j, closer, use} or null.
-function tryOpen(op, nPrev, delims, bounds) {
+// token is not plain text). `runs`/`bounds` come from the masked source;
+// `byPos` maps run positions to tokenised delimiters. Returns
+// {tag, j, closer, use} or null.
+function tryOpen(op, nPrev, runs, bounds, byPos) {
   const ch = op.ch;
   const after = op.after;
   if (after === '' || isUnicodeSpace(after)) return null;
@@ -911,7 +931,7 @@ function tryOpen(op, nPrev, delims, bounds) {
       ? (op.before === '*' || op.before === '_' || isNtPunct(op.before))
       : isNtPunct(nAt);
     if (d !== '' && nAt !== '' && !u) continue;
-    const hit = scanForCloser(op, j, k, delims, v);
+    const hit = scanForCloser(op, j, k, runs, v, byPos);
     if (!hit) continue;
     const tag = ch === '~' ? 'del' : (Math.min(k, hit.use) % 2 === 1 ? 'em' : 'strong');
     // The match takes 1 delimiter per side for em, 2 for strong, and the
@@ -926,11 +946,145 @@ function tryOpen(op, nPrev, delims, bounds) {
 // Resolve emphasis over the flat item list, opener-driven, returning the
 // leaf's HTML. `delims` holds every delimiter run (real runs in `items`
 // plus phantom runs inside extended autolinks) in document order.
-function resolveEmphasis(items, delims, src, refs, inLink, st) {
-  const bounds = { '*': -1, '_': -1, '~': -1 };
-  for (const d of delims) {
-    if (d.pos > 0 && !isFeWS(d.before)) bounds[d.ch] = d.pos;
+// Find the next backtick run of exactly `len` at or after `from`.
+// Returns the run's start index, or -1.
+function nextBacktickRun(src, from, len) {
+  const n = src.length;
+  let j = from;
+  while (j < n) {
+    if (src[j] === '`') {
+      let k = j;
+      while (k < n && src[k] === '`') k++;
+      if (k - j === len) return j;
+      j = k;
+    } else j++;
   }
+  return -1;
+}
+
+// Try to match an inline link starting at s[i] ('[' or '![') using the
+// masking pass's label rule: code spans in the label need equal-length
+// runs, and the label has no nested brackets. Returns the index just
+// past the closing ')' or -1.
+function matchMaskedLink(s, i) {
+  const n = s.length;
+  let j = i;
+  if (s[j] === '!') j++;
+  if (j >= n || s[j] !== '[') return -1;
+  j++;
+  while (j < n) {
+    const c = s[j];
+    if (c === ']') break;
+    if (c === '[') return -1;
+    if (c === '`') {
+      let k = j;
+      while (k < n && s[k] === '`') k++;
+      const len = k - j;
+      const close = nextBacktickRun(s, k, len);
+      if (close === -1) return -1;
+      j = close + len;
+      continue;
+    }
+    j++;
+  }
+  if (j >= n || s[j] !== ']') return -1;
+  let k = j + 1;
+  if (k >= n || s[k] !== '(') return -1;
+  k++;
+  let depth = 0;
+  while (k < n) {
+    const c = s[k];
+    if (c === '\\') { k += 2; continue; }
+    if (c === '(') {
+      if (depth === 1) return -1;
+      depth = 1;
+      k++;
+      continue;
+    }
+    if (c === ')') {
+      if (depth === 0) return k + 1;
+      depth = 0;
+      k++;
+      continue;
+    }
+    k++;
+  }
+  return -1;
+}
+
+// The masked copy of the source: code-span contents, link spans and
+// HTML tags are replaced by filler, so delimiter runs inside them are
+// invisible to the emphasis scan. The masking is a single left-to-right
+// pass: a backtick run pairs with the next run of the same length (even
+// across a link label, so a mismatched code span in a label leaves the
+// link unmasked and its backticks free to swallow a later run), a link
+// is only masked when its label's code spans have equal runs, and an
+// escaped punctuation mark is masked too.
+function maskedSrc(src) {
+  const n = src.length;
+  const m = src.split('');
+  const fill = (a, b) => { for (let k = a; k < b; k++) m[k] = 'a'; };
+  let j = 0;
+  while (j < n) {
+    const c = src[j];
+    if (c === '\\' && j + 1 < n && isUnicodePunct(src[j + 1])) { fill(j, j + 2); j += 2; continue; }
+    if (c === '[' || (c === '!' && src[j + 1] === '[')) {
+      const end = matchMaskedLink(src, j);
+      if (end !== -1) { fill(j, end); j = end; continue; }
+      j++;
+      continue;
+    }
+    if (c === '`') {
+      let k = j;
+      while (k < n && src[k] === '`') k++;
+      const len = k - j;
+      const close = nextBacktickRun(src, k, len);
+      if (close !== -1) { fill(k, close); j = close + len; continue; }
+      j = k;
+      continue;
+    }
+    if (c === '<' && src[j + 1] !== ' ') {
+      let k = j + 1;
+      while (k < n && src[k] !== '>' && src[k] !== '<') k++;
+      if (k < n && src[k] === '>') { fill(j, k + 1); j = k + 1; continue; }
+      j++;
+      continue;
+    }
+    j++;
+  }
+  return m.join('');
+}
+
+// Delimiter runs of a masked source, plus the closer bound per char
+// (the last run start whose before-char is not whitespace). Runs of
+// three or more tildes are not candidates (a failed del swallows the
+// whole run as text) but still count for the `~` bound.
+function maskedRuns(masked) {
+  const n = masked.length;
+  const bounds = { '*': -1, '_': -1, '~': -1 };
+  const runs = [];
+  let p = 0;
+  while (p < n) {
+    const c = masked[p];
+    if (c === '*' || c === '_' || c === '~') {
+      let k = p;
+      while (k < n && masked[k] === c) k++;
+      if (p > 0 && !isFeWS(masked[p - 1])) bounds[c] = p;
+      if (!(c === '~' && k - p >= 3)) {
+        runs.push({ ch: c, n: k - p, pos: p, before: p > 0 ? masked[p - 1] : '', after: k < n ? masked[k] : '' });
+      }
+      p = k;
+    } else p++;
+  }
+  return { bounds, runs };
+}
+
+function resolveEmphasis(items, delims, src, refs, inLink, st) {
+  // Closer candidates and bounds come from the masked source; the
+  // tokenised delimiters supply item indexes and phantom flags.
+  const { bounds, runs } = maskedRuns(maskedSrc(src));
+  const byPos = new Map();
+  for (const d of delims) if (!byPos.has(d.pos)) byPos.set(d.pos, d);
   let out = '';
   let i = 0;
   let pending = null;
@@ -951,7 +1105,7 @@ function resolveEmphasis(items, delims, src, refs, inLink, st) {
       i++;
     }
     const nPrev = prevKind === 'text' ? op.before : '';
-    const hit = tryOpen(op, nPrev, delims, bounds);
+    const hit = tryOpen(op, nPrev, runs, bounds, byPos);
     if (!hit) {
       out += op.ch.repeat(op.n);
       prevKind = 'text';
@@ -2168,6 +2322,9 @@ function matchTableDelim(s) {
     else cells.push(null);
   }
   if (cells.length === 0) return null;
+  // A delimiter row must contain a colon or a pipe (a bare run of
+  // hyphens is a setext underline, not a table delimiter).
+  if (!/[:|]/.test(s)) return null;
   // The row must be made only of cells, pipes and whitespace.
   if (!/^[\s:|\-]+$/.test(s)) return null;
   return cells;
@@ -2200,18 +2357,19 @@ function parseParagraph(lines, i, hi, refs, paraBreaks, forcePara, inList) {
     const ind = indentCols(l);
     if (ind <= 3) {
       const s = l.slice(firstNonWs(l));
-      const se = matchSetext(s);
-      if (se) {
-        const content = extractDefs(paraLines, refs);
-        if (content.lines.length === 0) return { node: null, next: j };
-        // A setext heading's text drops the first line's leading
-        // spaces and the last line's trailing whitespace.
-        const hlines = content.lines;
-        hlines[0] = hlines[0].replace(/^[ \t]+/, '');
-        hlines[hlines.length - 1] = hlines[hlines.length - 1].replace(/[ \t]+$/, '');
-        return { node: { k: 'h', level: se, lines: hlines }, next: j + 1 };
-      }
+      // Once a table has started, its rows are never setext text.
       if (!isTable) {
+        const se = matchSetext(s);
+        if (se) {
+          const content = extractDefs(paraLines, refs);
+          if (content.lines.length === 0) return { node: null, next: j };
+          // A setext heading's text drops the first line's leading
+          // spaces and the last line's trailing whitespace.
+          const hlines = content.lines;
+          hlines[0] = hlines[0].replace(/^[ \t]+/, '');
+          hlines[hlines.length - 1] = hlines[hlines.length - 1].replace(/[ \t]+$/, '');
+          return { node: { k: 'h', level: se, lines: hlines }, next: j + 1 };
+        }
         const delim = matchTableDelim(s);
         if (delim && peekDefLines(paraLines) === 1) {
           isTable = true;
