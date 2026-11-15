@@ -1081,10 +1081,19 @@ function maskedRuns(masked) {
 
 function resolveEmphasis(items, delims, src, refs, inLink, st) {
   // Closer candidates and bounds come from the masked source; the
-  // tokenised delimiters supply item indexes and phantom flags.
-  const { bounds, runs } = maskedRuns(maskedSrc(src));
-  const byPos = new Map();
-  for (const d of delims) if (!byPos.has(d.pos)) byPos.set(d.pos, d);
+  // tokenised delimiters supply item indexes and phantom flags. The
+  // mask is built lazily: paragraphs with no delimiter runs never
+  // need it, and nested interiors are usually delimiter-free.
+  let mask = null;
+  const getMask = () => {
+    if (!mask) {
+      const { bounds, runs } = maskedRuns(maskedSrc(src));
+      const byPos = new Map();
+      for (const d of delims) if (!byPos.has(d.pos)) byPos.set(d.pos, d);
+      mask = { bounds, runs, byPos };
+    }
+    return mask;
+  };
   let out = '';
   let i = 0;
   let pending = null;
@@ -1105,7 +1114,8 @@ function resolveEmphasis(items, delims, src, refs, inLink, st) {
       i++;
     }
     const nPrev = prevKind === 'text' ? op.before : '';
-    const hit = tryOpen(op, nPrev, runs, bounds, byPos);
+    const m = getMask();
+    const hit = tryOpen(op, nPrev, m.runs, m.bounds, m.byPos);
     if (!hit) {
       out += op.ch.repeat(op.n);
       prevKind = 'text';
